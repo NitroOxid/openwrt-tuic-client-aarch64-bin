@@ -1,0 +1,89 @@
+name: Check TUIC release
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  check:
+    name: Check official TUIC release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Check latest TUIC release
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+
+          CURRENT_VERSION="$(sed -n 's/^PKG_VERSION:=//p' tuic-client/Makefile)"
+
+          if [ -z "$CURRENT_VERSION" ]; then
+            echo "ERROR: Could not read PKG_VERSION from Makefile."
+            exit 1
+          fi
+
+          LATEST_TAG="$(gh api \
+            repos/Itsusinn/tuic/releases \
+            --paginate \
+            --jq '.[] | select(.draft == false) | .tag_name' \
+            | grep -v -- '-' \
+            | head -n 1)"
+
+          if [ -z "$LATEST_TAG" ]; then
+            echo "ERROR: Could not determine latest stable TUIC release."
+            exit 1
+          fi
+
+          LATEST_VERSION="${LATEST_TAG#v}"
+
+          echo "Current version: $CURRENT_VERSION"
+          echo "Latest stable version: $LATEST_VERSION"
+
+          if [ "$CURRENT_VERSION" = "$LATEST_VERSION" ]; then
+            echo "TUIC is already up to date."
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          sed -i \
+            "s/^PKG_VERSION:=.*$/PKG_VERSION:=${LATEST_VERSION}/" \
+            tuic-client/Makefile
+
+          NEW_VERSION="$(sed -n 's/^PKG_VERSION:=//p' tuic-client/Makefile)"
+
+          if [ "$NEW_VERSION" != "$LATEST_VERSION" ]; then
+            echo "ERROR: Failed to update Makefile."
+            exit 1
+          fi
+
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push update
+        if: steps.check.outputs.updated == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+
+          VERSION="$(sed -n 's/^PKG_VERSION:=//p' tuic-client/Makefile)"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add tuic-client/Makefile
+          git commit -m "Update to ${VERSION}"
+          git push
+
+          echo "Update pushed. Starting build workflow..."
+          gh workflow run build.yml --ref main

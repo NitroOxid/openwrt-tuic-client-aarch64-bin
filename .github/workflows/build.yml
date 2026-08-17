@@ -1,0 +1,131 @@
+name: Build TUIC client
+
+on:
+  workflow_dispatch:
+  #push:
+    #branches:
+      #- main
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build OpenWrt APK (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: true
+      matrix:
+        arch:
+          - aarch64_cortex-a53
+          - aarch64_cortex-a72
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Read TUIC version
+        id: version
+        run: |
+          set -e
+
+          VERSION="$(sed -n 's/^PKG_VERSION:=//p' tuic-client/Makefile)"
+
+          if [ -z "$VERSION" ]; then
+            echo "ERROR: Could not read PKG_VERSION from Makefile."
+            exit 1
+          fi
+
+          echo "TUIC version: $VERSION"
+          echo "TUIC_VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build package with OpenWrt SDK
+        uses: openwrt/gh-action-sdk@main
+        env:
+          ARCH: ${{ matrix.arch }}-openwrt-25.12
+          FEEDNAME: tuic
+          PACKAGES: tuic-client
+          INDEX: 0
+          NO_REFRESH_CHECK: 1
+
+      - name: Find compiled APK
+        id: apk
+        run: |
+          set -e
+
+          APK="$(find bin/packages -type f -name 'tuic-client*.apk' | head -n 1)"
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not produced."
+            echo "Contents of bin/packages:"
+            find bin/packages -type f -print || true
+            exit 1
+          fi
+
+          VERSION="${{ steps.version.outputs.TUIC_VERSION }}"
+          OUTPUT="tuic-client_${VERSION}-r1_${{ matrix.arch }}.apk"
+
+          cp "$APK" "$OUTPUT"
+          echo "APK_FILE=$OUTPUT" >> "$GITHUB_OUTPUT"
+
+          echo "APK: $OUTPUT"
+          echo "SHA256:"
+          sha256sum "$OUTPUT"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tuic-client-${{ matrix.arch }}
+          path: ${{ steps.apk.outputs.APK_FILE }}
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Read TUIC version
+        id: version
+        run: |
+          set -e
+
+          VERSION="$(sed -n 's/^PKG_VERSION:=//p' tuic-client/Makefile)"
+
+          if [ -z "$VERSION" ]; then
+            echo "ERROR: Could not read PKG_VERSION from Makefile."
+            exit 1
+          fi
+
+          echo "TUIC_VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download APK artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tuic-client-*
+          merge-multiple: true
+          path: release
+
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+
+          VERSION="${{ steps.version.outputs.TUIC_VERSION }}"
+          TAG="${VERSION}"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release already exists. Replacing APKs."
+          else
+            echo "Creating release v${VERSION}..."
+
+            gh release create "$TAG" \
+              --title "v${VERSION}" \
+              --notes "Update to ${VERSION}"
+          fi
+
+          gh release upload "$TAG" release/*.apk --clobber
